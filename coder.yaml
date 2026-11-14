@@ -1,0 +1,162 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/docker-agent/main/agent-schema.json
+#
+# Coding agent for Docker Agent (formerly cagent). Config schema v16.
+#
+#   docker agent debug config docker-agent.yaml   # validate
+#   docker agent run docker-agent.yaml
+#
+# One coder, one fresh-context reviewer, one task per session.
+# What the 2026 evidence supports (sources at the end):
+#   - The model matters most. One agent with a shell and file tools is enough
+#     scaffold; agent teams cost 2-5x and rarely help on coding work [1][2].
+#   - Short always-on instructions work. Extra requirements raise cost without
+#     raising success, and optional skills often go unused [3][4].
+#   - Tests the agent runs itself are its ground truth [5].
+#   - Most public skills change nothing measurable. One is pinned here [6][7].
+#   - The multi-agent pattern with the best evidence is review by an agent that
+#     has not seen the author's context [8].
+#   - Leftovers from earlier work degrade later work, so start a new session
+#     (`/new`) for each unrelated task. Follow-ups on the same change stay in
+#     the same session. Anything worth keeping goes in AGENTS.md or git [9].
+
+version: "16"
+
+# abliteration.ai serves an OpenAI-compatible API. Put your ak_... key in the
+# ABLIT_KEY environment variable; `token_key` names the variable, not the key.
+providers:
+  abliteration:
+    base_url: https://api.abliteration.ai/v1
+    token_key: ABLIT_KEY
+
+# The model is the most consequential choice in this file: on one identical
+# bash-only harness, models scored from 45% to 97% [1].
+models:
+  main:
+    provider: abliteration
+    model: abliterated-model-large-flash
+
+agents:
+  root:
+    model: main
+    description: Makes small, verified, reviewed code changes in the current repository.
+
+    # Add a line only after watching the agent make the mistake it would prevent [3].
+    instruction: |
+      You are a senior software engineer working in the user's repository.
+      Aim for the smallest change that fully solves the task, and prove it works by running it.
+
+      1. Understand. Read the code involved and how the project already solves similar
+         problems. For a bug, first reproduce it with a failing test or command.
+      2. Change. Load the `ponytail` skill if it is available and follow it. Edit the
+         fewest lines and files that solve the task, in the style of the surrounding code.
+      3. Verify. Run the project's own tests and linters before reporting a change as
+         done, and fix what they report. Never weaken, skip, or delete a test to get a pass.
+      4. Review. Once the tests pass and before you commit, run the `review-change`
+         skill, passing it the task in the user's words and the test command you ran.
+         Skip it only for a one-file change of a few lines. Fix every "Wrong" finding
+         and re-run the tests. Run the review once per task, never a second time.
+      5. Report. Say what changed, why, what you ran with its result, and any review
+         finding you did not fix. If something is unverified, say so plainly. If the
+         user asked for a pull request, commit on a new branch and open it now. Do not
+         write summary files.
+
+      These hold even when a shorter solution exists:
+      - Do only what was asked. Leave unrelated code alone: no drive-by refactors,
+        renames, reformatting, or dependency changes. Mention unrelated problems; do
+        not fix them.
+      - Keep existing behaviour at the edges unless the task requires changing it:
+        public signatures, defaults, input validation, error types and messages.
+      - If the request is ambiguous and a wrong guess would be expensive, ask one
+        precise question. Otherwise state your assumption and proceed.
+
+    # Loaded if present. Write it by hand and keep it to what the code cannot tell
+    # the agent, starting with the exact test and lint commands. Generated context
+    # files slightly lowered success and raised cost by about 20% [3].
+    add_prompt_files: [AGENTS.md]
+    add_environment_info: true
+
+    # The default is unlimited. The user is asked before continuing past this.
+    max_iterations: 40
+
+    toolsets:
+      - type: filesystem
+      - type: shell
+
+    skills:
+      # Pulled from GitHub at startup, pinned to a full commit SHA so the text the
+      # model reads cannot change until this line does. If the fetch fails the agent
+      # runs without it. Ponytail is a ~600-word "smallest complete change" ruleset.
+      # Its author's benchmark and a third-party rerun both found about half the
+      # code; the rerun also found skipped edge cases on data/CLI tasks, which is
+      # why the instruction above protects edge behaviour [7].
+      # The skills that measurably help are mostly library-specific [6]; add ones
+      # for your own stack the same way, and read them at the commit you pin.
+      - https://github.com/DietrichGebert/ponytail?ref=7801d061243d7b753bad0e0b3c057cd250b11755 # v5.3.3
+      - ponytail
+
+      # The reviewer. `context: fork` runs it in a new sub-session with none of
+      # the coder's conversation, and only its findings come back [8]. It is
+      # read-only: the two git commands below run once when the skill starts and
+      # their output is pasted in, and `allowed_tools` hides the shell and the
+      # write tools. The instruction above names this skill because agents often
+      # skip skills they are not told to use [4].
+      - name: review-change
+        description: >-
+          Independent read-only review of the uncommitted change in a fresh context.
+          Run once per task, after the tests pass and before committing.
+        context: fork
+        allowed_tools:
+          - read_file
+          - read_multiple_files
+          - list_directory
+          - directory_tree
+          - search_files_content
+        instructions: |
+          # Review the uncommitted change
+
+          You are the reviewer, not the author. You did not write this change and you
+          cannot edit files or run commands. Do not attempt to fix anything. The task
+          and the tests that were run are in the user's request above these instructions.
+
+          Changed files:
+          !`git status --short --untracked-files=all`
+
+          Diff against the last commit:
+          !`git diff HEAD`
+
+          Files marked `??` are new and missing from the diff: read them in full. If
+          the diff shows an error, the repository has no commits yet: read every file
+          in the list. If the list is empty, reply "Nothing to review." and stop.
+          Read surrounding code and callers as needed.
+
+          Report only the following, most serious first, each as `file:line` plus one
+          sentence saying what is wrong and why:
+          1. Wrong: a bug, a requirement of the task that is missed, or a caller that breaks.
+          2. Drift: behaviour changed that the task did not ask for (public signature,
+             default, input validation, error type or message).
+          3. Out of scope: changes the task does not need.
+          4. Untested: changed behaviour that no test exercises.
+
+          No style comments, no praise, no rewritten code. If nothing qualifies, reply
+          exactly "No findings."
+
+# SOURCES
+# [1] Vals AI, SWE-bench Verified on a bash-only harness (Sept 2026).
+#     https://www.vals.ai/benchmarks/swebench
+# [2] Kim et al., "Towards a Science of Scaling Agent Systems" (2025),
+#     arXiv:2512.08296; Vals AI, "Do Agent Teams Pay Off?" (Oct 2026),
+#     https://www.vals.ai/blogs/multi-agent-vibe-code-bench
+# [3] Gloaguen et al., "Evaluating AGENTS.md" (2026). arXiv:2602.11988
+# [4] Vercel, "AGENTS.md outperforms skills in our agent evals" (2026).
+#     https://vercel.com/blog/agents-md-outperforms-skills-in-our-agent-evals
+# [5] Anthropic, "Building effective agents" (2024).
+#     https://www.anthropic.com/engineering/building-effective-agents
+# [6] Han et al., "SWE-Skills-Bench" (2026). arXiv:2603.15401
+# [7] https://github.com/DietrichGebert/ponytail (benchmarks/README.md);
+#     third-party rerun: https://kuldeepb19.github.io/ponytail-benchmark/
+# [8] Cognition, "Multi-Agents: What's Actually Working" (Apr 2026).
+#     https://cognition.com/blog/multi-agents-working
+#     Anthropic, "When to fold subagents into your main agent loop" (Oct 2026).
+#     https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop
+# [9] "Diagnosing and Mitigating Context Rot in Long-horizon Search" (2026).
+#     arXiv:2606.29718. Measured on search tasks, not coding.
