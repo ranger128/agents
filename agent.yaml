@@ -1,0 +1,32 @@
+#!/usr/bin/env cagent run
+
+# Test agent: Femur-hosted model + Palantir MCP against Danube.
+#   export DANUBE_API_KEY=... FEMUR_API_KEY=...
+#   cagent run agent.yaml
+agents:
+  root:
+    model: femur
+    description: Test agent with Palantir MCP access to Danube
+    instruction: |
+      You are a test agent connected to a Foundry stack through the Palantir MCP.
+      Use the tools to answer questions about the stack. Keep answers short and
+      say which tools you used.
+    toolsets:
+      - type: mcp
+        command: npx
+        args:
+          - -y
+          - palantir-mcp
+          - --foundry-api-url
+          - https://danube-staging.palantircloud.com   # swap if you mean a different Danube stack
+        env:
+          FOUNDRY_TOKEN: ${DANUBE_API_KEY}
+
+models:
+  femur:
+    provider: openai
+    model: gpt-5.6-sol
+    base_url: https://production.femur.rubix.cloud/llm-portal/openai-direct/v1
+    token_key: FEMUR_API_KEY
+    provider_opts:
+      api_type: openai_responses
